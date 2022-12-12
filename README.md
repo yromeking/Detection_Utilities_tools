@@ -19,5 +19,7 @@ Main Items:
 
 ---
 Project Diagram
-    <img src="/readme_imgs/spi_diagram.jpg"/>
+   ---
+   ![alt text](/readme_imgs/spi_diagram.jpg)
+   ---
 ---

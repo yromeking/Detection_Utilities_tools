@@ -7,7 +7,11 @@ Big Data project to search for POIs using Kafka, MongoDB, and Face Recognition M
 
 ### Project Workflow
 
-
+---
+Project Diagram
+   ---
+   ![alt text](/readme_imgs/spi_diagram.jpg)
+   ---
 ---
 Main Items:
 1. Kafka Messaging System
@@ -16,10 +20,4 @@ Main Items:
 4. OpenCV
 5. Face Recognition Module + Face Encodings
 6. Face Database
-
----
-Project Diagram
-   ---
-   ![alt text](/readme_imgs/spi_diagram.jpg)
-   ---
 ---

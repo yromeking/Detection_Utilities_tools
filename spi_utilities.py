@@ -11,7 +11,7 @@ import json
 from json import JSONEncoder
 from threading import Thread
 import cv2, time
-# import pp
+import pp
 import gridfs
 import numpy as np
 import hashlib
@@ -29,7 +29,8 @@ from ipyleaflet import (
     Popup,
     GeoJSON,
     DrawControl,
-    basemaps
+    basemaps,
+    FullScreenControl
 )
 # for labeling marker as image:
 from ipywidgets import HTML
@@ -37,6 +38,9 @@ import IPython
 from ipywidgets import widgets
 from sidecar import Sidecar
 import traceback
+import pickle
+from vidgear.gears import CamGear
+import random
 
 
 
@@ -85,7 +89,7 @@ class SPI_Utils:
         self.width = 640
         
         # setup parallel processing server for processing videos simultaneously:
-        # self.job_server = pp.Server()  # for parallel processing videos to MongoDB
+        self.job_server = pp.Server()  # for parallel processing videos to MongoDB
         self.job_list = []
         self.results = []
         
@@ -124,10 +128,13 @@ class SPI_Utils:
             # LDN_COORDINATES = (51.5074, 0.1278)
             us_center = [38.6252978589571, -97.3458993652344]
             zoom = 0
-            self.spi_map = Map(center=us_center, zoom=zoom)            
+            self.spi_map = Map(center=us_center, zoom=zoom)
+            self.spi_map.add_control(FullScreenControl())
             s = Sidecar(title='SPI Map')
             # show the map:
             display(self.spi_map)
+        
+        self.recognized_faces_and_locations_set = set()
 
         
     # load request from json file (this data serves as user request form for giving camera feeds):
@@ -223,7 +230,7 @@ class SPI_Utils:
         
             
             
-    def mongodb_filler(self):
+    def frame_transmitter(self):
         kafka_consumer_w_messg_decoder = self.consume_kafka_messages()
         for decoded_message in kafka_consumer_w_messg_decoder:
             print("decoded_message:", decoded_message)
@@ -243,7 +250,7 @@ class SPI_Utils:
         '''
         
     # manual implementation of structured streaming:
-    def perform_spark_streaming_and_processing(self, patience=5):
+    def perform_spark_streaming_and_processing(self, patience=500):
         
         processed_data = []
         frame_counter = 0
@@ -253,9 +260,10 @@ class SPI_Utils:
         
         while True:
             
-            time.sleep(5)
+            time.sleep(2)
             
             ongoing_files = os.listdir(self.data_store_dir)
+            random.shuffle(ongoing_files)
             new_files = [i for i in ongoing_files if i not in processed_data]
             print(f"New files #: {len(new_files)}")
             
@@ -268,18 +276,22 @@ class SPI_Utils:
                 print("Waiting period for new video source has been reached. Exiting SPI Recognition Module.")
                 
                 break
-        
+            start = time.time()
             # start processing each image:
             for f in new_files:
                 try:
-                    with open(os.path.join(self.data_store_dir, f)) as json_file:
-                        json_data = json.load(json_file)
-                    # print(np.array(json_data["frame"]).shape)
-                    frame = Image.fromarray(np.array(json_data["frame"]).astype(np.uint8))
+                    # with open(os.path.join(self.data_store_dir, f)) as json_file:
+                    #    frame_data = json.load(json_file)
+                    
+                    with open(os.path.join(self.data_store_dir, f), "rb") as input_file:
+                        frame_data = pickle.load(input_file)
+                    frame_counter+=1
+                    # print(np.array(frame_data["frame"]).shape)
+                    frame = Image.fromarray(np.array(frame_data["frame"]).astype(np.uint8))
                     # print(np.array(frame).shape)
-                    cam_id = json_data["cam_id"]
-                    cam_latitude = json_data["cam_latitude"]
-                    cam_longitude = json_data["cam_longitude"]
+                    cam_id = frame_data["cam_id"]
+                    cam_latitude = frame_data["cam_latitude"]
+                    cam_longitude = frame_data["cam_longitude"]
 
                     # Detect Faces
                     face_locations, face_names = self.sfr.detect_known_faces(np.asarray(frame))
@@ -288,28 +300,41 @@ class SPI_Utils:
                         #cv2.putText(frame, name,(x1, y1 - 10), cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 200), 2)
                         #cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 200), 4)
                         if name != "Unknown":
-                            print(f"Face detected at cam_id = {cam_id}, frame_num = {frame_counter}: {name} at Lat/Long = {cam_latitude}/{cam_longitude}")
-                            frame_counter+=1
 
                             # mark:
                             #poi_message.value = f"{name}"
                             current_poi_img_path = os.path.join(self.face_store_dir, f"{name}.jpg")
                             current_poi_img_marker = get_marker_widget(current_poi_img_path, name)
-                            mark = Marker(location=[cam_latitude, cam_longitude], title=f"{name}\n{cam_latitude}, {cam_longitude}", draggable=False)
-                            mark.popup = current_poi_img_marker
-                            self.spi_map+=mark
-                            mark.interact(opacity=(0.0, 1.0, 0.01))
+                            found_name_location = f"{name}\n{cam_latitude}, {cam_longitude}\ncam_id={cam_id}"
+                            if not (found_name_location in self.recognized_faces_and_locations_set):
+                                self.recognized_faces_and_locations_set.add(found_name_location)
+                                mark = Marker(location=[cam_latitude, cam_longitude], title=found_name_location, draggable=False)
+                                mark.popup = current_poi_img_marker
+                                self.spi_map+=mark
+                                mark.interact(opacity=(0.0, 1.0, 0.01))
+                                self.recognized_faces_and_locations_set.add(found_name_location)
+                            
+                                print(f"Face detected at cam_id = {cam_id}, frame_num = {frame_counter}: {name} at Lat/Long = {cam_latitude}/{cam_longitude}")
+                                frame.save(f"./det/{cam_id}_{frame_counter}.jpg")
 
-                            #plt.figure()
-                            #plt.title(f"<<<{name}>>> Detected at {cam_latitude}/{cam_longitude} lat/long.")
-                            #plt.imshow(frame[y1:y2, x1:x2])
+                                #plt.figure()
+                                #plt.title(f"<<<{name}>>> Detected at {cam_latitude}/{cam_longitude} lat/long.")
+                                #plt.imshow(frame[y1:y2, x1:x2])
+                        # else:
 
-                            # display(self.spi_map)
+                                # display(self.spi_map)
                     processed_data.append(f)
                 except:
                     print(f"<<<ERROR with file: {f}>>>")
                     print(traceback.format_exc())
                     print("\n")
+                # print("DONE\n")
+            end = time.time()
+            total_time = end-start
+            if total_time == 0:
+                total_time = 0.00001
+            fps = frame_counter/total_time
+            print(f"FPS: {frame_counter}/{total_time} = {fps} FPS")
                 
                 
             
@@ -333,7 +358,24 @@ class BytesEncoder(json.JSONEncoder):
 # Camera streaming class => saves arriving images into either (a) Mongo or (b) into local files as json (requiring auto cleaning every once in a while).
 class ThreadedCamera(object):
     def __init__(self, data_store_dir, width, cam_id, cam_latitude, cam_longitude, src=0, fps=30):
-        self.capture = cv2.VideoCapture(src)
+        
+        self.stream_type = "CamGear"            
+        try:
+            self.stream = CamGear(source=src, stream_mode = True, logging=True).start() # YouTube Video URL as input
+            blank = self.stream.read()
+            self.stream_type = "CamGear"
+        except:
+            try:
+                self.capture = cv2.VideoCapture(src)
+                if self.capture.isOpened():
+                    self.status, self.frame = self.capture.read()
+                if self.status:
+                    self.stream_type = "OpenCV"
+                else:
+                    self.stream_type = "None"
+            except:
+                print("Could not read any.")
+                self.stream_type = "None"
         
         self.data_store_dir = data_store_dir
         self.base_name = hashlib.sha256(src.encode('utf-8')).hexdigest()
@@ -346,17 +388,50 @@ class ThreadedCamera(object):
         self.cam_longitude = cam_longitude
         
         # Start frame retrieval thread
-        self.thread = Thread(target=self.update, args=())
-        self.thread.daemon = True
-        self.thread.start()
+        if self.stream_type != "None":
+            self.thread = Thread(target=self.update, args=())
+            self.thread.daemon = True
+            self.thread.start()
         
         
         
         
     def update(self):
         while True:
-            if self.capture.isOpened():
-                self.status, self.frame = self.capture.read()
+            
+            # OPENCV APPROACH:
+            if self.stream_type == "OpenCV":
+                if self.capture.isOpened():
+                    self.status, self.frame = self.capture.read()
+                else:
+                    try:
+                        cap.release()
+                    except:
+                        pass
+                    break
+                    
+            # CamGEAR APPROACH:
+            elif self.stream_type == "CamGear":
+                self.frame = self.stream.read()
+            else:
+                print("<<<Provided link format is not supported. Skipping.>>>")
+                break
+                
+            if self.frame is None:
+                print("<<<No frame read. Skipping.>>>")
+                # Turn off OpenCV module:
+                try:
+                    cap.release()
+                except:
+                    pass
+                # Turn off CamGear:
+                try:
+                    self.stream.stop()
+                except:
+                    pass
+                break
+            else:
+                self.status = True
             
             if self.status:
                 #if ((self.frame_count) % int(self.fps/3)) != 0:
@@ -371,7 +446,8 @@ class ThreadedCamera(object):
                 # np.savetxt(save_frame_as, self.frame_reshaped, delimiter=',') # save it as numpy array in csv file
                 
                 # for encoding:
-                save_frame_as = os.path.join(self.data_store_dir, f"{self.base_name}_{self.frame_count}.json")
+                # save_frame_as = os.path.join(self.data_store_dir, f"{self.base_name}_{self.frame_count}.json")
+                save_frame_as = os.path.join(self.data_store_dir, f"{self.base_name}_{self.frame_count}.pickle")
                 
                 # json file from image
                 data = {
@@ -384,8 +460,11 @@ class ThreadedCamera(object):
                         'cam_latitude' : self.cam_latitude,
                         'cam_longitude' : self.cam_longitude
                 }
-                with open(save_frame_as, 'w') as f:
-                    encodedNumpyData = json.dump(data, f, cls=NumpyArrayEncoder)  # use dumps() to use it as local file
+                # with open(save_frame_as, 'w') as f:
+                #    encodedNumpyData = json.dump(data, f, cls=NumpyArrayEncoder)  # use dumps() to use it as local file
+                with open(save_frame_as, 'wb') as f:
+                    # Pickle the 'data' dictionary using the highest protocol available.
+                    pickle.dump(data, f, pickle.HIGHEST_PROTOCOL)
             
 
 
